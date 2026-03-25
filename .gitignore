@@ -1,0 +1,26 @@
+# Secrets / credentials
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE / tooling
+.cursor/
+.vscode/
+
+# Logs
+*.log
