@@ -2,8 +2,6 @@
 
 ## System information
 
-Fill in for your submission (or paste output of `nvidia-smi` on the machine that runs Isaac Sim):
-
 
 | Item              | Your value                                                                                                 |
 | ----------------- | ---------------------------------------------------------------------------------------------------------- |
