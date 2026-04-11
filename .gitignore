@@ -1,4 +1,5 @@
 # Secrets / credentials
+.ec2_sync_host
 *.pem
 *.key
 *.p12
@@ -24,3 +25,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Cloned dependency (separate repo, ~16 GB)
+BEHAVIOR-1K/
+
+# Generated scene-graph outputs (images + JSON)
+output/
