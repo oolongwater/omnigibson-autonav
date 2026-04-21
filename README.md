@@ -1,135 +1,222 @@
-# OmniGibson take-home — Part B (180 s autonomous navigation)
+# BEHAVIOR-1K
 
-## System information
+![BEHAVIOR-1K](./BEHAVIOR-1K/docs/assets/readme_splash_logo.png)
 
+**BEHAVIOR-1K** is a comprehensive simulation benchmark for testing embodied AI agents on 1,000 everyday household activities. This monolithic repository provides everything needed to train and evaluate agents on human-centered tasks like cleaning, cooking, and organizing — activities selected from real human time-use surveys and preference studies.
 
-| Item              | Your value                                                                                                 |
-| ----------------- | ---------------------------------------------------------------------------------------------------------- |
-| **OS**            | Ubuntu 22.04 (EC2)                                                                                         |
-| **GPU**           | NVIDIA A10G (g5.xlarge — 1× A10G, 24 GB)                                                                   |
-| **Driver / CUDA** | Driver 565.x, CUDA 12.7 (Deep Learning Base OSS Nvidia Driver GPU AMI 20250919)                            |
-| **Stack**         | BEHAVIOR-1K + OmniGibson + Isaac Sim per [behavior.stanford.edu](https://behavior.stanford.edu/index.html) |
+This repository layout pairs upstream **BEHAVIOR-1K / OmniGibson / Isaac Sim** (under `BEHAVIOR-1K/`) with a **D1 replication pipeline** at the repository root: curated multi-room and multi-floor indoor scenes, **ground-truth structural scene graphs**, **ground-truth navigation paths**, a **waypoint-following navigation baseline** on the simulator traversability map (A\*, pure pursuit, LiDAR blending, ground-truth pose), and optional **first-person gallery renders**. That pipeline matches the D1 scope in the project proposal *Scene-Graph-Based Navigation for Search in Indoor HADR Environments* (base undamaged scenes and annotations first; dynamic hazard-conditioned variants are future work).
 
+***Check out our [main website](https://behavior.stanford.edu/) for more details.*** The official stack install is also documented in the [Installation Guide](https://behavior.stanford.edu/getting_started/installation.html).
 
-## Installation (copy-paste)
+---
 
-Complete the official BEHAVIOR-1K / Isaac Sim setup first. Then, from a clone that includes `BEHAVIOR-1K/OmniGibson`:
+## Pipeline overview
 
-```bash
-cd BEHAVIOR-1K/OmniGibson
-conda activate behavior   # or the env name from the official guide
-pip install -e .
+Run commands from the **repository root** (the directory that contains `BEHAVIOR-1K/` and `selected_scenes.txt`), unless noted. Stages 1–3 are CPU-only and can run on macOS without a GPU. Stages 4–5 require an NVIDIA GPU with the OmniGibson + Isaac Sim stack from Stage 0.
+
+```mermaid
+flowchart LR
+    install["Stage_0: setup.sh (OmniGibson + Isaac + dataset)"] --> scenes["Stage_1: download + list + load scenes"]
+    scenes --> graphs["Stage_2: build_scene_graphs (GT scene graphs)"]
+    graphs --> paths["Stage_3: build_nav_paths (GT paths)"]
+    paths --> nav["Stage_4: autonomous_nav (waypoint baseline)"]
+    nav --> gallery["Stage_5: render_robot_views / render_robot_videos"]
 ```
 
-Download scene/dataset assets so `Rs_int` loads as in Part A.
+---
 
-## Execution
+## Prerequisites
 
-From this repo root (`OmniGibson_TakeHomeTest`), with OmniGibson on `PYTHONPATH` (local) or on EC2 after sync:
+| Item | Notes |
+| --- | --- |
+| **GPU** | NVIDIA GPU with a recent driver (e.g. g5.xlarge with A10G, 24 GB, has been used). |
+| **OS** | **Ubuntu 22.04** for Isaac Sim + OmniGibson. |
+| **Python env** | **Conda**; the provided installer creates env `behavior` with **Python 3.10** (see [BEHAVIOR-1K/setup.sh](BEHAVIOR-1K/setup.sh)). |
+| **Disk** | Tens of GB for `datasets/` and caches (official guide gives current sizes). |
+| **Network** | Hugging Face access for the BEHAVIOR-1K asset download used by the pipeline scripts. |
+
+---
+
+## Stage 0: Install BEHAVIOR-1K, OmniGibson, and Isaac Sim
+
+1. Clone this **full** repository (not only the `BEHAVIOR-1K` subfolder) so the pipeline scripts and [selected_scenes.txt](selected_scenes.txt) sit next to `BEHAVIOR-1K/`.
+
+2. From the **repository root**:
+
+   ```bash
+   cd BEHAVIOR-1K
+   chmod +x setup.sh
+   ./setup.sh --new-env --omnigibson --bddl --dataset \
+     --accept-conda-tos --accept-nvidia-eula --accept-dataset-tos
+   ```
+
+   `setup.sh` creates conda env `behavior`, installs **BDDL**, **PyTorch** (CUDA), **OmniGibson** in editable form, **Isaac Sim** via pip, and downloads **BEHAVIOR-1K** robot assets, scene data, and 2025 challenge task instances. See the script’s `--help` for optional flags (e.g. `--cuda-version`).
+
+3. Activate and set data path (adjust `REPO` to your clone path):
+
+   ```bash
+   conda activate behavior
+   export OMNIGIBSON_DATA_PATH="$REPO/BEHAVIOR-1K/datasets"
+   ```
+
+If you hit environment issues, use the [Installation Guide](https://behavior.stanford.edu/getting_started/installation.html) and ensure no stale `EXP_PATH` / `CARB_APP_PATH` / `ISAAC_PATH` are set from an old install.
+
+---
+
+## Stage 1: Curate and validate base scenes
+
+**Goal:** A diverse set of **undamaged** BEHAVIOR-1K scenes (single-floor multi-room and multi-floor), aligned with the D1 benchmark-foundation focus (see proposal §5.2).
+
+1. **Download** JSON, layout, and related assets for the scenes listed in [selected_scenes.txt](selected_scenes.txt) (10 curated names, including `Rs_int`, `Benevolence_1_int`, `Benevolence_2_int`, and multi-floor `house_double_floor_*`).
+
+   From **repository root**:
+
+   ```bash
+   python3 download_scene_assets.py --accept-license
+   ```
+
+   - Default data root: `BEHAVIOR-1K/datasets` (overridable with `--data-dir`).
+   - Use `--skip-key` only if you are **not** running the full simulator and only need JSON/layout for offline graph tools.
+
+2. **Regenerate or verify** the scene list from what is on disk:
+
+   ```bash
+   python3 list_and_select_scenes.py --output selected_scenes.txt
+   ```
+
+3. **Smoke-test loading** every scene in OmniGibson (GPU):
+
+   ```bash
+   python3 load_scenes.py --accept-license
+   ```
+
+   - Uses [selected_scenes.txt](selected_scenes.txt) by default (`--scenes-file` to override).
+   - On an EC2 instance with NICE DCV, you can use [cycle_scenes.sh](cycle_scenes.sh) instead (wrapper around [cycle_scenes.py](cycle_scenes.py), fixed list of 10 scenes, includes `--accept-license`).
+
+---
+
+## Stage 2: Build ground-truth scene graphs
+
+**Goal:** For each scene, an **entity-centric structural graph** (rooms, doors, connectivity) derived from scene JSON and layout maps, as in the proposal’s Figure 4(B).
+
+From **repository root**:
 
 ```bash
-python autonomous_nav_60s.py              # full ~180 s sim segment
-python autonomous_nav_60s.py --short      # ~10 s smoke test
-python autonomous_nav_60s.py --no-teleop-camera
-# First-person RGB video (OpenCV mp4v, then ffmpeg H.264 baseline for QuickTime / previews):
-python autonomous_nav_60s.py --record [--output output/autonomous_nav_fpv.mp4]
+python3 build_scene_graphs.py --scene-list selected_scenes.txt --output-dir output/scene_graphs
 ```
 
-**EC2 + DCV:** Sync, then run the launcher inside the DCV desktop (see `run_partB_dcv.sh`).
+- Resolves `--scenes-root` from `OMNIGIBSON_DATA_PATH` or `BEHAVIOR-1K/datasets/behavior-1k-assets/scenes`.
+- Typical outputs per scene under `output/scene_graphs/<SceneName>/`: `scene_graph.json`, `scene_graph.png`, `scene_graph_overlay_*.png`, `birds_eye_layout_*.png`. The builder also writes `output/scene_graphs/SCENE_GRAPHS_README.txt` at the output root the first time you run it.
+
+**Optional:** After hand-editing a few `scene_graph.json` files for complex multi-floor scenes, re-rasterize overlays:
 
 ```bash
-chmod +x sync_to_ec2.sh dcv_tunnel.sh
-./sync_to_ec2.sh --skip-behavior -i /path/to/key.pem ubuntu@<EC2_IP>
-# Mac: keep tunnel open, then DCV → https://localhost:8443
-./dcv_tunnel.sh -i /path/to/key.pem ubuntu@<EC2_IP>
+python3 regen_three_scenes.py
 ```
 
-On EC2 after code or asset changes, clear caches if sim behaves oddly, then restart:
+---
+
+## Stage 3: Build ground-truth navigation paths
+
+**Goal:** **Low-level paths** (waypoint polylines) between room pairs on the traversability map, for supervision and for downstream planning/visualization, as in proposal §4.2 / Figure 4(D).
+
+From **repository root** (defaults read [selected_scenes.txt](selected_scenes.txt) and write next to each graph):
 
 ```bash
-rm -rf /opt/dlami/nvme/og-appdata/global/cache/*
-rm -f  /opt/dlami/nvme/og-appdata/local/data/og_dataset/scenes/Rs_int/json/*.usd
+python3 build_nav_paths.py --output-root output/scene_graphs --waypoint-spacing 0.10
 ```
 
-**Recording checklist:** Terminal shows commands → launch script → autonomous motion → **180 s** continuous segment; use printed `[TIMER] sim_t=...` or an on-screen stopwatch (30 Hz × 180 s = 5400 steps).
+- Default scenes root: `BEHAVIOR-1K/datasets/behavior-1k-assets/scenes`.
+- Outputs per scene: `nav_paths.json`, `nav_paths_floor_*.png` under `output/scene_graphs/<SceneName>/`.
 
-### Benevolence multi-waypoint navigation
+---
 
-Extended demos visit multiple user-marked goals in **`Benevolence_1_int`** (three red-X waypoints from a marked PDF) and **`Benevolence_2_int`** (seven hard-coded waypoints x1–x7). Same stack as Part B: A* on the traversability map (with objects + doorway painting), pure pursuit, LiDAR avoidance, doors opened then non-collidable.
+## Stage 4: Run the waypoint-execution navigation baseline
+
+**Goal:** **High-level task goals** (e.g. ordered waypoints) plus **low-level** A\* on the traversability map, **pure pursuit** along the polyline, and **2D LiDAR**-based reactive behavior, using **ground-truth pose** from the simulator. This is the D1 “planner + waypoint follower on GT map/graph” baseline (proposal §4.2, Figure 3–4), not the full online scene-graph search system.
+
+From **repository root**, with `conda activate behavior` and `OMNIGIBSON_DATA_PATH` set:
 
 ```bash
-# Benevolence 1 — typical one-shot run with FPV recording (matches EC2 helper defaults)
+# Part B: ~180 s segment in Rs_int (use --short for ~10 s smoke test)
+python autonomous_nav_60s.py --record --no-teleop-camera
+
+# Benevolence_1_int: multi-goal tour ( --once ends after the last goal)
 python autonomous_nav_benevolence1.py --record --no-teleop-camera --once
 
-# Benevolence 2 — seven-waypoint tour
+# Benevolence_2_int: seven-waypoint tour (uses nav_paths.json for passage hints)
 python autonomous_nav_benevolence2.py --record --no-teleop-camera --once
 ```
 
-Each script writes diagnostics under `output/` (e.g. nav CSV, events log, summary JSON, MP4 when `--record` is set). See [autonomous_nav_benevolence1.py](autonomous_nav_benevolence1.py) and [autonomous_nav_benevolence2.py](autonomous_nav_benevolence2.py).
+Default FPV output paths: `output/autonomous_nav_fpv.mp4`, `output/autonomous_nav_benevolence1_fpv.mp4`, `output/autonomous_nav_benevolence2_fpv.mp4`. Each run can also emit diagnostics next to the video (e.g. `*_nav.csv`, `*_events.log`, `*_summary.json`).
 
-### Waypoint path plots
+**Static path figures (optional):** planned (and optional executed) paths on the traversability map:
 
-Static figures overlay planned (and optionally actual) paths on the scene traversability PNG:
+```bash
+python3 plot_marked_waypoints_path.py
+python3 plot_marked_waypoints_path_benevolence2.py
+```
 
-- [plot_marked_waypoints_path.py](plot_marked_waypoints_path.py) — detects red marks in `benevolence1_marked.pdf`, registers to `floor_trav_0.png`, runs A* between snapped waypoints. Default PDF: `docs/benevolence1_marked.pdf` in the repo, or pass `--pdf`. Output: `output/benevolence1_marked_path.png` (override with `--out`). Optional `--nav-csv` overlays the driven trajectory.
-- [plot_marked_waypoints_path_benevolence2.py](plot_marked_waypoints_path_benevolence2.py) — uses hard-coded world waypoints and precomputed `output/scene_graphs/Benevolence_2_int/nav_paths.json` segments. Output: `output/benevolence2_marked_path.png`. Pass `--trav` or cache `floor_trav_0.png` under `.cache/` if `BEHAVIOR-1K/` is absent (see script docstring).
+Defaults write `output/benevolence1_marked_path.png` and `output/benevolence2_marked_path.png` (see `--pdf`, `--nav-csv`, `--out` in each script).
 
-### Robot view / video renderers
+---
 
-Batch utilities save robot-perspective RGB (and depth for views) or short FPV videos per scene; outputs go to **`output2/`** by default.
+## Stage 5: Gallery renders (RGB stills and FPV videos)
 
-- [render_robot_views.py](render_robot_views.py) + [render_robot_views.sh](render_robot_views.sh) — still frames per scene.
-- [render_robot_videos.py](render_robot_videos.py) + [render_robot_videos.sh](render_robot_videos.sh) — FPV clips (wrapper sets conda, `OMNIGIBSON_DATA_PATH`, DCV window size, etc.).
+**Goal:** Qualitative “gallery” assets comparable to a proposal figure sheet: robot **first-person** RGB stills and short **FPV** clips per scene, driven in part by `nav_paths.json`.
 
-Run the `.sh` launchers on an EC2 DCV desktop after syncing the repo; pass `--headless` for non-interactive SSH if supported by your stack.
+On a **GPU** machine with the same conda env, from **repository root**:
 
-### EC2 run / pull workflow
+```bash
+./render_robot_views.sh
+./render_robot_videos.sh
+```
 
-Helpers mirror [sync_to_ec2.sh](sync_to_ec2.sh) host resolution (`ubuntu@<EC2_IP>`, `-i /path/to/key.pem`, `EC2_SYNC_TARGET`, or `.ec2_sync_host`):
+These wrap [render_robot_views.py](render_robot_views.py) and [render_robot_videos.py](render_robot_videos.py) with `--accept-license` and default output under `output2/robot_views/` and `output2/robot_videos/`. Pass `--headless` on a headless host if your stack supports it. Override scenes with e.g. `./render_robot_videos.sh --scenes Rs_int,Benevolence_1_int`.
 
-| Script | Purpose |
-| ------ | ------- |
-| [run_benevolence_ec2_and_pull.sh](run_benevolence_ec2_and_pull.sh) | Rsync repo, run `autonomous_nav_benevolence1.py --record --no-teleop-camera --once` on EC2 (background job), pull MP4 + logs, optional local H.264 transcode |
-| [run_benevolence2_ec2_and_pull.sh](run_benevolence2_ec2_and_pull.sh) | Same for `autonomous_nav_benevolence2.py` |
-| [sync_and_render_robot_videos_ec2.sh](sync_and_render_robot_videos_ec2.sh) | Sync and kick off batch robot video rendering on the instance |
-| [pull_robot_videos.sh](pull_robot_videos.sh) | `rsync` `output2/robot_videos/` from EC2 to local |
-| [pull_robot_views.sh](pull_robot_views.sh) | `rsync` robot view stills |
-| [monitor_pull_robot_videos.sh](monitor_pull_robot_videos.sh) | Poll remote render and pull when done |
-| [transcode_robot_videos_h264.sh](transcode_robot_videos_h264.sh) | After pull on macOS: re-encode `fpv_*.mp4` to H.264 for QuickTime / Finder |
+---
 
-For DCV tunneling from a Mac, use `./dcv_tunnel.sh -i /path/to/key.pem ubuntu@<EC2_IP>` as in **Execution** above.
+## Stage 6 (optional): EC2, DCV, sync, and pull
 
-## Navigation approach
+For a typical cloud workflow, mirror the repo to the instance, use **NICE DCV** for interactive Kit, and pull artifacts back to a laptop. Helper scripts (run from the machine that matches their comments — Mac vs EC2) include:
 
-- **Inputs:** 2D LiDAR from the Turtlebot `ScanSensor` (`scan` in observations, ranges in meters after denormalization); traversability grid from `InteractiveTraversableScene` / `TraversableMap` for planning; simulator **ground-truth** robot pose for position, heading, and replanning checks.
-- **Localization assumption:** **Ground-truth pose** from `get_position_orientation` (no SLAM/odometry error model). LiDAR provides local obstacle geometry for reactive avoidance layered on top of the global plan.
-- **Planner:** **A** shortest path on the traversability map via `env.scene.get_shortest_path(..., entire_path=True, robot=robot)`. The map uses `**trav_map_with_objects: True`** so walls are obstacles; **doorway cells** are painted from door object positions plus hardcoded `DOORWAYS` rectangles so paths can cross real openings between rooms. Replanned every *N* steps and when deviation from the path is large.
-- **Controller:** **Pure pursuit** on the A polyline when a path exists (lookahead on the path → heading error → normalized differential-drive commands). If planning fails, **bearing-to-goal** (turn-then-drive) is used as fallback. Final command blends pure pursuit with **LiDAR avoidance** (sector minima: slow / stop-and-turn when forward range is short; lateral gap steers in narrow gaps). Normalized `(v, ω)` go to `DifferentialDriveController`.
-- **Collision handling / safety:** **Walls** stay collidable so the robot cannot clip through room boundaries; **doors** are opened then set `**visual_only`** so panels do not narrow the doorway. LiDAR reacts to walls and furniture; optional `ContactBodies` logging ignores floors.
+- [sync_to_ec2.sh](sync_to_ec2.sh) — `rsync` repository to `~/OmniGibson_TakeHomeTest` (optional `--skip-behavior` if `BEHAVIOR-1K` already exists on the instance).
+- [dcv_tunnel.sh](dcv_tunnel.sh) — SSH local forward to DCV (e.g. open `https://localhost:8443` on the client).
+- [run_partB_dcv.sh](run_partB_dcv.sh) — launches [autonomous_nav_60s.py](autonomous_nav_60s.py) with EC2-oriented env.
+- [run_benevolence_ec2_and_pull.sh](run_benevolence_ec2_and_pull.sh) / [run_benevolence2_ec2_and_pull.sh](run_benevolence2_ec2_and_pull.sh) — remote run + pull logs/video.
+- [sync_and_render_robot_videos_ec2.sh](sync_and_render_robot_videos_ec2.sh) / [monitor_pull_robot_videos.sh](monitor_pull_robot_videos.sh) / [pull_robot_videos.sh](pull_robot_videos.sh) — batch FPV render and sync.
+- [transcode_robot_videos_h264.sh](transcode_robot_videos_h264.sh) — after pull on **macOS**, re-encode to H.264 for QuickTime; default directory `output2/robot_videos`.
 
-## Troubleshooting (what broke + how I fixed it)
+If the simulator loads stale USD or behaves oddly after asset edits, clear Kit caches (global cache under `og-appdata/global/cache/` and scene JSON USDC artifacts under `og_dataset/scenes/<Scene>/json/*.usd`).
 
-- **Robot clipped through the middle wall:** Walls had been made non-collidable and the trav map ignored wall occupancy. **Fix:** Remove wall `visual_only`, set `**trav_map_with_objects: True`**, paint traversable strips at doorways, and **follow the A path with pure pursuit** instead of driving straight to the goal.
-- **Stuck oscillating in doorways:** Open door meshes plus aggressive LiDAR stop/slow thresholds blocked the gap. **Fix:** Keep doors non-collidable after open, **widen doorway painting** (`DOORWAY_RADIUS_CELLS`), and **lower** `SLOW_DIST` / `STOP_DIST` so the robot commits through the opening.
-- **DCV “endpoint unreachable” for `https://localhost:8443`:** The SSH **port forward** was not running. **Fix:** Run `./dcv_tunnel.sh -i key.pem ubuntu@<IP>` (or `ssh -L 8443:127.0.0.1:8443 ...`) and leave that session open while connecting.
-- **Stale scene / weird load after edits:** Kit cached USD or global cache. **Fix:** Remove `og-appdata` global cache and Rs_int `json/*.usd` as in **Execution**, then restart.
-- `**pkill` kills your SSH session:** Avoid `pkill -f autonomous_nav_60s.py` over SSH (the pattern matches the remote shell). Use `pkill -f '[a]utonomous_nav_60s.py'` or match only the `python` process.
+---
 
-## Files added in this Repo
+## Output layout (quick reference)
 
-| File | Role |
-| ---- | ---- |
-| [autonomous_nav_60s.py](autonomous_nav_60s.py) | Part B entry point; `--record` FPV video |
-| [autonomous_nav_benevolence1.py](autonomous_nav_benevolence1.py) | Benevolence_1_int multi-waypoint nav |
-| [autonomous_nav_benevolence2.py](autonomous_nav_benevolence2.py) | Benevolence_2_int seven-waypoint nav |
-| [plot_marked_waypoints_path.py](plot_marked_waypoints_path.py) | Benevolence 1 path figure from marked PDF |
-| [plot_marked_waypoints_path_benevolence2.py](plot_marked_waypoints_path_benevolence2.py) | Benevolence 2 path figure |
-| [render_robot_views.py](render_robot_views.py), [render_robot_views.sh](render_robot_views.sh) | Per-scene robot RGB/depth stills |
-| [render_robot_videos.py](render_robot_videos.py), [render_robot_videos.sh](render_robot_videos.sh) | Per-scene FPV videos |
-| [run_benevolence_ec2_and_pull.sh](run_benevolence_ec2_and_pull.sh), [run_benevolence2_ec2_and_pull.sh](run_benevolence2_ec2_and_pull.sh) | EC2 run + pull for Benevolence demos |
-| [sync_and_render_robot_videos_ec2.sh](sync_and_render_robot_videos_ec2.sh) | EC2 batch video render |
-| [pull_robot_videos.sh](pull_robot_videos.sh), [pull_robot_views.sh](pull_robot_views.sh) | Pull `output2/` artifacts |
-| [monitor_pull_robot_videos.sh](monitor_pull_robot_videos.sh) | Watch remote render + pull |
-| [transcode_robot_videos_h264.sh](transcode_robot_videos_h264.sh) | Local H.264 transcode |
-| [run_partB_dcv.sh](run_partB_dcv.sh), [dcv_tunnel.sh](dcv_tunnel.sh), [sync_to_ec2.sh](sync_to_ec2.sh) | Part B DCV / sync helpers |
-| [cycle_scenes.sh](cycle_scenes.sh) | EC2 scene cycle launcher (`OMNIGIBSON_DATA_PATH`, etc.) |
+- `output/scene_graphs/<SceneName>/` — `scene_graph.json`, `nav_paths.json`, overlays.
+- `output/autonomous_nav_*.mp4` and `output/autonomous_nav_*_nav.csv` (when recorded) — Part B and Benevolence baselines.
+- `output/benevolence1_marked_path.png`, `output/benevolence2_marked_path.png` — static path figures.
+- `output2/robot_views/<SceneName>/` — per-scene robot RGB/depth stills.
+- `output2/robot_videos/<SceneName>/` — e.g. `fpv_<SceneName>.mp4` and `fpv_*_nav.csv`.
+
+---
+
+## Troubleshooting (short)
+
+- **Missing assets / license** — Re-run [download_scene_assets.py](download_scene_assets.py) with `--accept-license`, or use Stage 0 `setup.sh --dataset` and accept dataset terms. Use `load_scenes.py --accept-license` for non-interactive download during smoke tests.
+- **Stale or corrupted sim state** — Remove Kit / appdata caches (`og-appdata/global/cache/*`) and scene USD caches (`og_dataset/scenes/<Scene>/json/*.usd`).
+- **DCV “localhost:8443” unreachable** — Ensure [dcv_tunnel.sh](dcv_tunnel.sh) (or an equivalent `ssh -L`) is running.
+- **Killing the wrong process over SSH** — Avoid `pkill -f` patterns that match your shell; prefer a process-specific pattern like `pkill -f '[a]utonomous_nav_60s.py'`.
+
+---
+
+## Citation
+
+```bibtex
+@article{li2024behavior1k,
+    title   = {BEHAVIOR-1K: A Human-Centered, Embodied AI Benchmark with 1,000 Everyday Activities and Realistic Simulation},
+    author  = {Chengshu Li and Ruohan Zhang and Josiah Wong and Cem Gokmen and Sanjana Srivastava and Roberto Martín-Martín and Chen Wang and Gabrael Levine and Wensi Ai and Benjamin Martinez and Hang Yin and Michael Lingelbach and Minjune Hwang and Ayano Hiranaka and Sujay Garlanka and Arman Aydin and Sharon Lee and Jiankai Sun and Mona Anvari and Manasi Sharma and Dhruva Bansal and Samuel Hunter and Kyu-Young Kim and Alan Lou and Caleb R Matthews and Ivan Villa-Renteria and Jerry Huayang Tang and Claire Tang and Fei Xia and Yunzhu Li and Silvio Savarese and Hyowon Gweon and C. Karen Liu and Jiajun Wu and Li Fei-Fei},
+    journal = {arXiv preprint arXiv:2403.09227},
+    year    = {2024}
+}
+```
