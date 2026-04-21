@@ -26,8 +26,9 @@ Thumbs.db
 # Logs
 *.log
 
-# Cloned dependency (separate repo, ~16 GB)
-BEHAVIOR-1K/
+# Cloned dependency (separate repo, ~16 GB) — public README is tracked; rest stays local
+BEHAVIOR-1K/*
+!BEHAVIOR-1K/README.md
 
 # Generated scene-graph outputs (images + JSON)
 output/
