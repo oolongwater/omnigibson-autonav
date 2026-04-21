@@ -1,14 +1,16 @@
 #!/bin/bash
-# Cycle 10 hardcoded BEHAVIOR-1K scenes in OmniGibson (~5 s sim each by default).
-# Run from DCV desktop on EC2: ./cycle_scenes.sh   or   ./cycle_scenes.sh --skip-download
+# Save robot-perspective RGB/depth images per scene (render_robot_views.py).
+# Run on EC2 DCV desktop: ./render_robot_views.sh
+# Extra args pass through: ./render_robot_views.sh --scenes Rs_int --num-views 2
+# Headless over SSH: ./render_robot_views.sh --headless
 set -euo pipefail
-ROOT="${CYCLE_SCENES_ROOT:-$HOME/OmniGibson_TakeHomeTest}"
-if [[ -f "$ROOT/cycle_scenes.py" ]]; then
+ROOT="${RENDER_ROBOT_VIEWS_ROOT:-$HOME/OmniGibson_TakeHomeTest}"
+if [[ -f "$ROOT/render_robot_views.py" ]]; then
   cd "$ROOT"
-elif [[ -f "$HOME/cycle_scenes.py" ]]; then
+elif [[ -f "$HOME/render_robot_views.py" ]]; then
   cd "$HOME"
 else
-  echo "cycle_scenes.py not found. Sync from your Mac: ./sync_to_ec2.sh" >&2
+  echo "render_robot_views.py not found. Sync from your Mac: ./sync_to_ec2.sh" >&2
   exit 1
 fi
 source ~/miniconda/etc/profile.d/conda.sh
@@ -24,4 +26,4 @@ export DISPLAY="${DISPLAY:-:0}"
 export XAUTHORITY="${XAUTHORITY:-/run/user/$(id -u)/dcv/og-demo.xauth}"
 export OMNIGIBSON_DCV_WINDOW_WIDTH="${OMNIGIBSON_DCV_WINDOW_WIDTH:-1280}"
 export OMNIGIBSON_DCV_WINDOW_HEIGHT="${OMNIGIBSON_DCV_WINDOW_HEIGHT:-800}"
-exec python cycle_scenes.py --accept-license "$@"
+exec python render_robot_views.py --accept-license --output-dir output2/robot_views "$@"

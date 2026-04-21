@@ -13,9 +13,14 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
+import cv2
+import numpy as np
 import torch as th
 
 # Repo layout: OmniGibson_TakeHomeTest/BEHAVIOR-1K/OmniGibson/omnigibson
@@ -192,7 +197,7 @@ def build_env_config() -> dict:
                 "action_normalize": True,
                 "action_type": "continuous",
                 "sensor_config": {
-                    "VisionSensor": {"sensor_kwargs": {"image_height": 128, "image_width": 128}},
+                    "VisionSensor": {"sensor_kwargs": {"image_height": 256, "image_width": 256}},
                     "ScanSensor": {
                         "sensor_kwargs": {
                             "min_range": LIDAR_MIN_RANGE,
@@ -222,6 +227,96 @@ def extract_scan_from_obs(robot_obs: dict) -> th.Tensor | None:
 
 def normalized_scan_to_meters(scan_norm: th.Tensor) -> th.Tensor:
     return scan_norm * (LIDAR_MAX_RANGE - LIDAR_MIN_RANGE) + LIDAR_MIN_RANGE
+
+
+# --- FPV video recording helpers ---
+
+
+def extract_rgb_from_obs(robot_obs: dict):
+    """Walk nested robot obs dict and return the first ``"rgb"`` tensor found."""
+    for _sensor_name, sensor_obs in robot_obs.items():
+        if isinstance(sensor_obs, dict) and "rgb" in sensor_obs:
+            return sensor_obs["rgb"]
+    return None
+
+
+def rgb_to_bgr_uint8(rgb_tensor) -> np.ndarray:
+    if isinstance(rgb_tensor, th.Tensor):
+        arr = rgb_tensor.detach().cpu().numpy()
+    else:
+        arr = np.asarray(rgb_tensor)
+    if arr.ndim != 3 or arr.shape[-1] < 3:
+        raise ValueError(f"Expected HxWx>=3 RGB, got {arr.shape}")
+    if arr.shape[-1] == 4:
+        arr = arr[..., :3]
+    if arr.dtype != np.uint8:
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
+
+def _resolve_ffmpeg_tool(name: str) -> str | None:
+    found = shutil.which(name)
+    if found:
+        return found
+    for d in ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"):
+        p = Path(d) / name
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p)
+    return None
+
+
+def finalize_mp4(path: Path) -> None:
+    """Re-encode mp4v to H.264 Baseline for QuickTime / browser / IDE preview."""
+    if path.suffix.lower() != ".mp4" or not path.is_file():
+        return
+    ffmpeg_bin = _resolve_ffmpeg_tool("ffmpeg")
+    if ffmpeg_bin is None:
+        print(f"  [WARN] ffmpeg not found; {path.name} stays mp4v (may not play in QuickTime).")
+        return
+    tmp = path.with_suffix(".h264.tmp.mp4")
+    vf: list[str] = []
+    ffprobe_bin = _resolve_ffmpeg_tool("ffprobe")
+    if ffprobe_bin:
+        try:
+            pr = subprocess.run(
+                [ffprobe_bin, "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", str(path)],
+                check=False, capture_output=True, text=True,
+            )
+            if pr.returncode == 0 and pr.stdout.strip():
+                parts = pr.stdout.strip().split("x")
+                if len(parts) == 2:
+                    w0, h0 = int(parts[0]), int(parts[1])
+                    if min(w0, h0) < 480:
+                        if w0 >= h0:
+                            vf = ["-vf", "scale=480:-2:flags=neighbor"]
+                        else:
+                            vf = ["-vf", "scale=-2:480:flags=neighbor"]
+        except (ValueError, OSError):
+            pass
+    cmd = [
+        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono",
+        "-i", str(path), "-shortest",
+        "-map", "1:v:0", "-map", "0:a:0",
+        *vf,
+        "-c:v", "libx264", "-profile:v", "baseline", "-level", "3.0",
+        "-crf", "18", "-pix_fmt", "yuv420p",
+        "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
+        "-movflags", "+faststart",
+        "-c:a", "aac", "-b:a", "48k", "-ac", "1",
+        str(tmp),
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdin=subprocess.DEVNULL)
+        tmp.replace(path)
+        if sys.platform == "darwin":
+            subprocess.run(["xattr", "-c", str(path)], check=False, capture_output=True)
+        print(f"  Finalized {path.name} -> H.264")
+    except (OSError, subprocess.CalledProcessError) as e:
+        print(f"  [WARN] ffmpeg finalize failed for {path}: {e}")
+        if tmp.is_file():
+            tmp.unlink(missing_ok=True)
 
 
 def wrap_angle_pi(a: float) -> float:
@@ -544,6 +639,17 @@ def main():
         action="store_true",
         help="Do not enable viewer camera teleoperation (default: enabled; use WASD/mouse to frame the scene).",
     )
+    parser.add_argument(
+        "--record",
+        action="store_true",
+        help="Record first-person POV video from the robot's RGB camera.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=_REPO_ROOT / "output" / "autonomous_nav_fpv.mp4",
+        help="Output path for the recorded FPV video (default: output/autonomous_nav_fpv.mp4).",
+    )
     args = parser.parse_args()
 
     n_steps = 300 if args.short else N_STEPS
@@ -605,6 +711,12 @@ def main():
     total_path_m = 0.0
     prev_x, prev_y = x, y
 
+    writer: cv2.VideoWriter | None = None
+    video_path: Path = args.output
+    if args.record:
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[RECORD] FPV video -> {video_path}")
+
     print("=" * 72)
     print("TIMER (sim time): show this window during your 180s recording.")
     print("Commands: same stack as Part A; this script runs the autonomous segment.")
@@ -619,6 +731,16 @@ def main():
                 f"[TIMER] sim_t={step / float(ACTION_FREQ):6.2f}s / {sim_seconds:.0f}s | "
                 f"goals_reached={goals_reached} | goal=({goal_x:.2f},{goal_y:.2f})"
             )
+
+        if args.record:
+            rgb = extract_rgb_from_obs(obs[robot_name])
+            if rgb is not None:
+                bgr = rgb_to_bgr_uint8(rgb)
+                if writer is None:
+                    hh, ww = bgr.shape[0], bgr.shape[1]
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    writer = cv2.VideoWriter(str(video_path), fourcc, float(ACTION_FREQ), (ww, hh))
+                writer.write(bgr)
 
         x, y, yaw = robot_xy_yaw(robot)
 
@@ -669,6 +791,11 @@ def main():
         if terminated or truncated:
             og.log.warning("Episode ended unexpectedly (should not happen with DummyTask).")
             break
+
+    if writer is not None:
+        writer.release()
+        print(f"[RECORD] wrote {video_path} ({step + 1} frames)")
+        finalize_mp4(video_path)
 
     print("=" * 72)
     print("SUMMARY")

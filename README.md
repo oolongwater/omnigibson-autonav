@@ -31,6 +31,8 @@ From this repo root (`OmniGibson_TakeHomeTest`), with OmniGibson on `PYTHONPATH`
 python autonomous_nav_60s.py              # full ~180 s sim segment
 python autonomous_nav_60s.py --short      # ~10 s smoke test
 python autonomous_nav_60s.py --no-teleop-camera
+# First-person RGB video (OpenCV mp4v, then ffmpeg H.264 baseline for QuickTime / previews):
+python autonomous_nav_60s.py --record [--output output/autonomous_nav_fpv.mp4]
 ```
 
 **EC2 + DCV:** Sync, then run the launcher inside the DCV desktop (see `run_partB_dcv.sh`).
@@ -51,6 +53,52 @@ rm -f  /opt/dlami/nvme/og-appdata/local/data/og_dataset/scenes/Rs_int/json/*.usd
 
 **Recording checklist:** Terminal shows commands → launch script → autonomous motion → **180 s** continuous segment; use printed `[TIMER] sim_t=...` or an on-screen stopwatch (30 Hz × 180 s = 5400 steps).
 
+### Benevolence multi-waypoint navigation
+
+Extended demos visit multiple user-marked goals in **`Benevolence_1_int`** (three red-X waypoints from a marked PDF) and **`Benevolence_2_int`** (seven hard-coded waypoints x1–x7). Same stack as Part B: A* on the traversability map (with objects + doorway painting), pure pursuit, LiDAR avoidance, doors opened then non-collidable.
+
+```bash
+# Benevolence 1 — typical one-shot run with FPV recording (matches EC2 helper defaults)
+python autonomous_nav_benevolence1.py --record --no-teleop-camera --once
+
+# Benevolence 2 — seven-waypoint tour
+python autonomous_nav_benevolence2.py --record --no-teleop-camera --once
+```
+
+Each script writes diagnostics under `output/` (e.g. nav CSV, events log, summary JSON, MP4 when `--record` is set). See [autonomous_nav_benevolence1.py](autonomous_nav_benevolence1.py) and [autonomous_nav_benevolence2.py](autonomous_nav_benevolence2.py).
+
+### Waypoint path plots
+
+Static figures overlay planned (and optionally actual) paths on the scene traversability PNG:
+
+- [plot_marked_waypoints_path.py](plot_marked_waypoints_path.py) — detects red marks in `benevolence1_marked.pdf`, registers to `floor_trav_0.png`, runs A* between snapped waypoints. Default PDF: `docs/benevolence1_marked.pdf` in the repo, or pass `--pdf`. Output: `output/benevolence1_marked_path.png` (override with `--out`). Optional `--nav-csv` overlays the driven trajectory.
+- [plot_marked_waypoints_path_benevolence2.py](plot_marked_waypoints_path_benevolence2.py) — uses hard-coded world waypoints and precomputed `output/scene_graphs/Benevolence_2_int/nav_paths.json` segments. Output: `output/benevolence2_marked_path.png`. Pass `--trav` or cache `floor_trav_0.png` under `.cache/` if `BEHAVIOR-1K/` is absent (see script docstring).
+
+### Robot view / video renderers
+
+Batch utilities save robot-perspective RGB (and depth for views) or short FPV videos per scene; outputs go to **`output2/`** by default.
+
+- [render_robot_views.py](render_robot_views.py) + [render_robot_views.sh](render_robot_views.sh) — still frames per scene.
+- [render_robot_videos.py](render_robot_videos.py) + [render_robot_videos.sh](render_robot_videos.sh) — FPV clips (wrapper sets conda, `OMNIGIBSON_DATA_PATH`, DCV window size, etc.).
+
+Run the `.sh` launchers on an EC2 DCV desktop after syncing the repo; pass `--headless` for non-interactive SSH if supported by your stack.
+
+### EC2 run / pull workflow
+
+Helpers mirror [sync_to_ec2.sh](sync_to_ec2.sh) host resolution (`ubuntu@<EC2_IP>`, `-i /path/to/key.pem`, `EC2_SYNC_TARGET`, or `.ec2_sync_host`):
+
+| Script | Purpose |
+| ------ | ------- |
+| [run_benevolence_ec2_and_pull.sh](run_benevolence_ec2_and_pull.sh) | Rsync repo, run `autonomous_nav_benevolence1.py --record --no-teleop-camera --once` on EC2 (background job), pull MP4 + logs, optional local H.264 transcode |
+| [run_benevolence2_ec2_and_pull.sh](run_benevolence2_ec2_and_pull.sh) | Same for `autonomous_nav_benevolence2.py` |
+| [sync_and_render_robot_videos_ec2.sh](sync_and_render_robot_videos_ec2.sh) | Sync and kick off batch robot video rendering on the instance |
+| [pull_robot_videos.sh](pull_robot_videos.sh) | `rsync` `output2/robot_videos/` from EC2 to local |
+| [pull_robot_views.sh](pull_robot_views.sh) | `rsync` robot view stills |
+| [monitor_pull_robot_videos.sh](monitor_pull_robot_videos.sh) | Poll remote render and pull when done |
+| [transcode_robot_videos_h264.sh](transcode_robot_videos_h264.sh) | After pull on macOS: re-encode `fpv_*.mp4` to H.264 for QuickTime / Finder |
+
+For DCV tunneling from a Mac, use `./dcv_tunnel.sh -i /path/to/key.pem ubuntu@<EC2_IP>` as in **Execution** above.
+
 ## Navigation approach
 
 - **Inputs:** 2D LiDAR from the Turtlebot `ScanSensor` (`scan` in observations, ranges in meters after denormalization); traversability grid from `InteractiveTraversableScene` / `TraversableMap` for planning; simulator **ground-truth** robot pose for position, heading, and replanning checks.
@@ -69,4 +117,19 @@ rm -f  /opt/dlami/nvme/og-appdata/local/data/og_dataset/scenes/Rs_int/json/*.usd
 
 ## Files added in this Repo
 
-`[autonomous_nav_60s.py](autonomous_nav_60s.py)` — Part B entry point. `[run_partB_dcv.sh](run_partB_dcv.sh)`, `[dcv_tunnel.sh](dcv_tunnel.sh)`, `[sync_to_ec2.sh](sync_to_ec2.sh)` — remote workflow helpers.
+| File | Role |
+| ---- | ---- |
+| [autonomous_nav_60s.py](autonomous_nav_60s.py) | Part B entry point; `--record` FPV video |
+| [autonomous_nav_benevolence1.py](autonomous_nav_benevolence1.py) | Benevolence_1_int multi-waypoint nav |
+| [autonomous_nav_benevolence2.py](autonomous_nav_benevolence2.py) | Benevolence_2_int seven-waypoint nav |
+| [plot_marked_waypoints_path.py](plot_marked_waypoints_path.py) | Benevolence 1 path figure from marked PDF |
+| [plot_marked_waypoints_path_benevolence2.py](plot_marked_waypoints_path_benevolence2.py) | Benevolence 2 path figure |
+| [render_robot_views.py](render_robot_views.py), [render_robot_views.sh](render_robot_views.sh) | Per-scene robot RGB/depth stills |
+| [render_robot_videos.py](render_robot_videos.py), [render_robot_videos.sh](render_robot_videos.sh) | Per-scene FPV videos |
+| [run_benevolence_ec2_and_pull.sh](run_benevolence_ec2_and_pull.sh), [run_benevolence2_ec2_and_pull.sh](run_benevolence2_ec2_and_pull.sh) | EC2 run + pull for Benevolence demos |
+| [sync_and_render_robot_videos_ec2.sh](sync_and_render_robot_videos_ec2.sh) | EC2 batch video render |
+| [pull_robot_videos.sh](pull_robot_videos.sh), [pull_robot_views.sh](pull_robot_views.sh) | Pull `output2/` artifacts |
+| [monitor_pull_robot_videos.sh](monitor_pull_robot_videos.sh) | Watch remote render + pull |
+| [transcode_robot_videos_h264.sh](transcode_robot_videos_h264.sh) | Local H.264 transcode |
+| [run_partB_dcv.sh](run_partB_dcv.sh), [dcv_tunnel.sh](dcv_tunnel.sh), [sync_to_ec2.sh](sync_to_ec2.sh) | Part B DCV / sync helpers |
+| [cycle_scenes.sh](cycle_scenes.sh) | EC2 scene cycle launcher (`OMNIGIBSON_DATA_PATH`, etc.) |

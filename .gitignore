@@ -31,3 +31,7 @@ BEHAVIOR-1K/
 
 # Generated scene-graph outputs (images + JSON)
 output/
+output2/
+
+# Local cached copies of BEHAVIOR-1K assets used by plotters
+.cache/
